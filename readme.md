@@ -1,3 +1,3 @@
 # `sab/storage-driver-webdav`
 
-Local file storage driver for `@directus/storage`
+Local Webdav storage driver for `@directus/storage`
