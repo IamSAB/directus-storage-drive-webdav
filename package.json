@@ -9,7 +9,7 @@
 		"directory": "packages/storage-driver-local"
 	},
 	"license": "BUSL-1.1",
-	"author": "Simon Bösch <>",
+	"author": "Simon Bösch <2011pbosi@gmail.com>",
 	"type": "module",
 	"exports": {
 		".": "./dist/index.js",
@@ -21,20 +21,17 @@
 	],
 	"scripts": {
 		"build": "tsup src/index.ts --format=esm --dts",
-		"dev": "tsup src/index.ts --format=esm --dts --watch",
-		"test": "vitest run",
-		"test:coverage": "vitest run --coverage"
+		"dev": "tsup src/index.ts --format=esm --dts --watch"
 	},
 	"dependencies": {
-		"@directus/storage": "workspace:*"
+		"@directus/storage": "^12.0.0",
+		"webdav": "^5.8.0"
 	},
 	"devDependencies": {
-		"@directus/tsconfig": "catalog:",
-		"@types/node": "catalog:",
-		"@ngneat/falso": "7.3.0",
-		"@vitest/coverage-v8": "catalog:",
-		"tsup": "catalog:",
-		"typescript": "catalog:",
-		"vitest": "catalog:"
+		"@directus/tsconfig": "^3.0.0",
+		"@ngneat/falso": "^8.0.2",
+		"@types/node": "^24.1.0",
+		"tsup": "^8.5.0",
+		"typescript": "^5.8.3"
 	}
 }

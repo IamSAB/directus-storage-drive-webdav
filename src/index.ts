@@ -1,175 +1,156 @@
-import type { TusDriver, ChunkedUploadContext, ReadOptions } from '@directus/storage';
-import fsProm from 'fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { access, copyFile, mkdir, opendir, rename, stat, unlink } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
-import stream, { type Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import type { ChunkedUploadContext, ReadOptions, TusDriver } from '@directus/storage';
+import { relative } from 'node:path';
+import { Readable } from 'stream';
+import type { WebDAVClient } from 'webdav';
+import { createClient } from 'webdav';
 
-export type DriverLocalConfig = {
-	root: string;
+export type DriverWebDAVConfig = {
+	baseUrl: string;
+	username: string;
+	password: string;
+	root?: string; // optional prefix path within the WebDAV server
 };
 
-export class DriverLocal implements TusDriver {
+export class DriverWebDAV implements TusDriver {
+	private readonly client: WebDAVClient;
 	private readonly root: string;
 
-	constructor(config: DriverLocalConfig) {
-		this.root = resolve(config.root);
+	constructor(config: DriverWebDAVConfig) {
+		this.client = createClient(config.baseUrl, {
+			username: config.username,
+			password: config.password,
+		});
+		this.root = config.root ?? '/';
 	}
 
 	private fullPath(filepath: string) {
-		return join(this.root, join(sep, filepath));
+		return `${this.root.replace(/\/$/, '')}/${filepath.replace(/^\//, '')}`;
 	}
 
-	/**
-	 * Ensures that the directory exists. If it doesn't, it's created.
-	 */
-	private async ensureDir(dirpath: string) {
-		await mkdir(dirpath, { recursive: true });
-	}
+	async read(filepath: string, options?: ReadOptions): Promise<Readable> {
+		const remotePath = this.fullPath(filepath);
 
-	async read(filepath: string, options?: ReadOptions) {
-		const { range } = options || {};
-
-		const stream_options: Parameters<typeof createReadStream>[1] = {};
-
-		if (range?.start) {
-			stream_options.start = range.start;
+		if (options?.range) {
+			const { start, end } = options.range;
+			const headers: Record<string, string> = {
+				Range: `bytes=${start}-${end ?? ''}`,
+			};
+			return this.client.createReadStream(remotePath, { headers });
 		}
 
-		if (range?.end) {
-			stream_options.end = range.end;
-		}
-
-		return createReadStream(this.fullPath(filepath), stream_options);
+		return this.client.createReadStream(remotePath);
 	}
 
 	async stat(filepath: string) {
-		const statRes = await stat(this.fullPath(filepath));
+		const remotePath = this.fullPath(filepath);
+		const stat = await this.client.stat(remotePath);
 
-		if (!statRes) {
-			throw new Error(`File "${filepath}" doesn't exist.`);
-		}
+		// If stat has a 'data' property, unwrap it
+		const fileStat = 'data' in stat ? stat.data : stat;
 
 		return {
-			size: statRes.size,
-			modified: statRes.mtime,
+			size: fileStat.size ?? 0,
+			modified: fileStat.lastmod ? new Date(fileStat.lastmod) : new Date(),
 		};
 	}
 
 	async exists(filepath: string) {
-		return access(this.fullPath(filepath))
-			.then(() => true)
-			.catch(() => false);
-	}
-
-	async move(src: string, dest: string) {
-		const fullSrc = this.fullPath(src);
-		const fullDest = this.fullPath(dest);
-		await this.ensureDir(dirname(fullDest));
-		await rename(fullSrc, fullDest);
-	}
-
-	async copy(src: string, dest: string) {
-		const fullSrc = this.fullPath(src);
-		const fullDest = this.fullPath(dest);
-		await this.ensureDir(dirname(fullDest));
-		await copyFile(fullSrc, fullDest);
-	}
-
-	async write(filepath: string, content: Readable) {
-		const fullPath = this.fullPath(filepath);
-		await this.ensureDir(dirname(fullPath));
-		const writeStream = createWriteStream(fullPath);
-		await pipeline(content, writeStream);
-	}
-
-	async delete(filepath: string) {
-		const fullPath = this.fullPath(filepath);
-		await unlink(fullPath);
-	}
-
-	list(prefix = '') {
-		const fullPrefix = this.fullPath(prefix);
-		return this.listGenerator(fullPrefix);
-	}
-
-	private async *listGenerator(prefix: string): AsyncGenerator<string> {
-		const prefixDirectory = prefix.endsWith(sep) ? prefix : dirname(prefix);
-
-		const directory = await opendir(prefixDirectory);
-
-		for await (const file of directory) {
-			const fileName = join(prefixDirectory, file.name);
-
-			if (fileName.toLowerCase().startsWith(prefix.toLowerCase()) === false) continue;
-
-			if (file.isFile()) {
-				yield relative(this.root, fileName);
-			}
-
-			if (file.isDirectory()) {
-				yield* this.listGenerator(join(fileName, sep));
-			}
+		try {
+			const remotePath = this.fullPath(filepath);
+			await this.client.stat(remotePath);
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
+	async move(src: string, dest: string) {
+		await this.client.moveFile(this.fullPath(src), this.fullPath(dest));
+	}
+
+	async copy(src: string, dest: string) {
+		await this.client.copyFile(this.fullPath(src), this.fullPath(dest));
+	}
+
+	async write(filepath: string, content: Readable) {
+		const remotePath = this.fullPath(filepath);
+		await this.client.putFileContents(remotePath, content);
+	}
+
+	async delete(filepath: string) {
+		await this.client.deleteFile(this.fullPath(filepath));
+	}
+
+	async *list(prefix = ''): AsyncGenerator<string> {
+		const remotePrefix = this.fullPath(prefix);
+		const res = await this.client.getDirectoryContents(remotePrefix, { deep: true });
+
+		// Unwrap data if needed
+		const contents = 'data' in res ? res.data : res;
+
+		for (const item of contents) {
+			if (item.type === 'file' && typeof item.filename === 'string') {
+				const relativePath = relative(this.root, item.filename);
+				yield relativePath.replace(/^\/+/, '');
+			}
+		}
+	}
 	get tusExtensions() {
 		return ['creation', 'termination', 'expiration'];
 	}
 
 	async createChunkedUpload(filepath: string, context: ChunkedUploadContext): Promise<ChunkedUploadContext> {
-		const fullPath = this.fullPath(filepath);
-		await this.ensureDir(dirname(fullPath));
-
-		await fsProm.writeFile(fullPath, '');
-
+		// Wrap empty buffer in a readable stream
+		const emptyStream = Readable.from(Buffer.alloc(0));
+		await this.write(filepath, emptyStream);
 		return context;
+	}
+
+	async writeChunk(
+		filepath: string,
+		content: Readable,
+		offset: number,
+		_context: ChunkedUploadContext
+	): Promise<number> {
+		const remotePath = this.fullPath(filepath);
+		const existing = await this.client.getFileContents(remotePath, { format: 'binary' });
+
+		const existingRaw = (typeof existing === 'object' && existing !== null && 'data' in existing)
+			? existing.data
+			: existing;
+
+		let existingBuffer: Buffer;
+
+		if (typeof existingRaw === 'string') {
+			existingBuffer = Buffer.from(existingRaw);
+		} else if (existingRaw instanceof ArrayBuffer) {
+			existingBuffer = Buffer.from(new Uint8Array(existingRaw));
+		} else {
+			existingBuffer = existingRaw as unknown as Buffer;
+		}
+
+		const chunks: Buffer[] = [];
+		for await (const chunk of content) {
+			chunks.push(Buffer.from(chunk));
+		}
+
+		const newContent = Buffer.concat([
+			existingBuffer.subarray(0, offset),
+			...chunks,
+		]);
+
+		await this.client.putFileContents(remotePath, newContent);
+
+		return newContent.length;
 	}
 
 	async deleteChunkedUpload(filepath: string, _context: ChunkedUploadContext): Promise<void> {
 		await this.delete(filepath);
 	}
 
-	async finishChunkedUpload(_filepath: string, _context: ChunkedUploadContext): Promise<void> {}
-
-	async writeChunk(
-		filepath: string,
-		content: Readable,
-		offset: number,
-		_context: ChunkedUploadContext,
-	): Promise<number> {
-		const fullPath = this.fullPath(filepath);
-
-		const writeable = await fsProm.open(fullPath, 'r+').then((file) =>
-			file.createWriteStream({
-				start: offset,
-			}),
-		);
-
-		let bytes_received = 0;
-
-		const transform = new stream.Transform({
-			transform(chunk, _, callback) {
-				bytes_received += chunk.length;
-				callback(null, chunk);
-			},
-		});
-
-		return new Promise<number>((resolve, reject) => {
-			stream.pipeline(content, transform, writeable, (err) => {
-				if (err) {
-					return reject();
-				}
-
-				offset += bytes_received;
-
-				return resolve(offset);
-			});
-		}).then(async (offset) => {
-			return offset;
-		});
+	async finishChunkedUpload(_filepath: string, _context: ChunkedUploadContext): Promise<void> {
+		// WebDAV doesn't require a finalization step
 	}
 }
 
-export default DriverLocal;
+export default DriverWebDAV;
