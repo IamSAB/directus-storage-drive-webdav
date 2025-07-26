@@ -1,11 +1,10 @@
 import { defineModule } from '@directus/extensions-sdk';
 
 export default defineModule({
-  id: 'storage-drive-webdav',
-  name: 'Storage Drive WebDAV',
+  id: 'storage-driver-webdav',
+  name: 'Storage Driver WebDAV',
   icon: 'box',
   routes: []
 });
 
-
-// we must somehow register the webdav driver
+// How can I register the webdav driver in an module extension?
